@@ -21,10 +21,12 @@ Parameters:
     Default: ''
   QuickSightRoleName:
     Type: String
-    Default: QuickSight-Keycloak-SSO-Role
+    Default: ''
+    Description: 'IAM role name for QuickSight SAML federation. Leave blank to auto-generate as QuickSight-Keycloak-SSO-Role-<region>.'
   SAMLProviderName:
     Type: String
-    Default: Keycloak
+    Default: ''
+    Description: 'IAM SAML provider name. Leave blank to auto-generate as Keycloak-<region>.'
 
 Mappings:
   CloudFrontPrefixList:
@@ -67,6 +69,8 @@ Conditions:
   HasKeyPair: !Not [!Equals [!Ref KeyPairName, '']]
   # us-east-1 EC2 public DNS uses the legacy "compute-1.amazonaws.com" suffix (no region segment)
   IsUsEast1: !Equals [!Ref 'AWS::Region', 'us-east-1']
+  UseDefaultRoleName: !Equals [!Ref QuickSightRoleName, '']
+  UseDefaultSAMLName: !Equals [!Ref SAMLProviderName, '']
 
 Resources:
   # Only allow Keycloak HTTP (8080) from CloudFront edge IPs. No 0.0.0.0/0. Admin access via SSM.
@@ -104,7 +108,10 @@ Resources:
                 Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*'
               - Effect: Allow
                 Action: [iam:UpdateSAMLProvider, iam:GetSAMLProvider]
-                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:saml-provider/${SAMLProviderName}'
+                Resource: !If
+                  - UseDefaultSAMLName
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:saml-provider/Keycloak-${AWS::Region}'
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:saml-provider/${SAMLProviderName}'
 
   KeycloakInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -114,7 +121,7 @@ Resources:
   KeycloakSAMLProvider:
     Type: AWS::IAM::SAMLProvider
     Properties:
-      Name: !Ref SAMLProviderName
+      Name: !If [UseDefaultSAMLName, !Sub 'Keycloak-${AWS::Region}', !Ref SAMLProviderName]
       SamlMetadataDocument: |
         <?xml version="1.0" encoding="UTF-8"?>
         <md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" entityID="https://placeholder.example.com/realms/placeholder">
@@ -138,13 +145,16 @@ Resources:
     Type: AWS::IAM::Role
     DependsOn: KeycloakSAMLProvider
     Properties:
-      RoleName: !Ref QuickSightRoleName
+      RoleName: !If [UseDefaultRoleName, !Sub 'QuickSight-Keycloak-SSO-Role-${AWS::Region}', !Ref QuickSightRoleName]
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
-              Federated: !Sub 'arn:aws:iam::${AWS::AccountId}:saml-provider/${SAMLProviderName}'
+              Federated: !If
+                - UseDefaultSAMLName
+                - !Sub 'arn:aws:iam::${AWS::AccountId}:saml-provider/Keycloak-${AWS::Region}'
+                - !Sub 'arn:aws:iam::${AWS::AccountId}:saml-provider/${SAMLProviderName}'
             Action: ['sts:AssumeRoleWithSAML', 'sts:TagSession']
             Condition:
               StringEquals:
@@ -233,8 +243,11 @@ Resources:
           STACK_NAME="${AWS::StackName}"
           REGION="${AWS::Region}"
           ACCT="${AWS::AccountId}"
-          SAML_NAME="${SAMLProviderName}"
-          ROLE_NAME="${QuickSightRoleName}"
+          SAML_NAME_RAW="${SAMLProviderName}"
+          ROLE_NAME_RAW="${QuickSightRoleName}"
+          # Resolve defaults: empty param -> auto-generate with region suffix
+          if [ -z "${!SAML_NAME_RAW}" ]; then SAML_NAME="Keycloak-${!REGION}"; else SAML_NAME="${!SAML_NAME_RAW}"; fi
+          if [ -z "${!ROLE_NAME_RAW}" ]; then ROLE_NAME="QuickSight-Keycloak-SSO-Role-${!REGION}"; else ROLE_NAME="${!ROLE_NAME_RAW}"; fi
           CF_DOMAIN="${CloudFrontDistribution.DomainName}"
           exec > >(tee /var/log/keycloak-setup.log) 2>&1
           echo "=== Setup Started $(date) ==="
@@ -367,7 +380,10 @@ Outputs:
   InstancePublicIP:
     Value: !Ref KeycloakEIP
   SAMLProviderArn:
-    Value: !Sub 'arn:aws:iam::${AWS::AccountId}:saml-provider/${SAMLProviderName}'
+    Value: !If
+      - UseDefaultSAMLName
+      - !Sub 'arn:aws:iam::${AWS::AccountId}:saml-provider/Keycloak-${AWS::Region}'
+      - !Sub 'arn:aws:iam::${AWS::AccountId}:saml-provider/${SAMLProviderName}'
   QuickSightRoleArn:
     Value: !GetAtt QuickSightSAMLRole.Arn
   IdPInitiatedSSOUrl:

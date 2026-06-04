@@ -83,7 +83,7 @@
       ],
       "Resource": [
         "arn:aws:iam::*:role/keycloak-*",
-        "arn:aws:iam::*:role/QuickSight-Keycloak-SSO-Role",
+        "arn:aws:iam::*:role/QuickSight-Keycloak-SSO-Role-*",
         "arn:aws:iam::*:instance-profile/keycloak-*"
       ]
     },
@@ -97,7 +97,7 @@
         "iam:GetSAMLProvider",
         "iam:TagSAMLProvider"
       ],
-      "Resource": "arn:aws:iam::*:saml-provider/Keycloak"
+      "Resource": "arn:aws:iam::*:saml-provider/Keycloak-*"
     },
     {
       "Sid": "CloudFront",
