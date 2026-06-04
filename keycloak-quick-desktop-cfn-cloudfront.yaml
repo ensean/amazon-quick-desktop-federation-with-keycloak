@@ -1,5 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Keycloak 26.1.4 + Quick Desktop (OIDC) + Quick Web (SAML) SSO, fronted by CloudFront
+Description: >-
+  Keycloak 26.1.4 + Quick Desktop (OIDC) + Quick Web (SAML) SSO, fronted by CloudFront.
+  TIP: Name this stack keycloak-<region> (e.g. keycloak-us-east-1) to match the auto-generated IAM resource names.
 Parameters:
   InstanceType:
     Type: String
