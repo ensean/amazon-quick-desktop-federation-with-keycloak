@@ -17,10 +17,12 @@ Parameters:
   QuickUserEmail:
     Type: String
     Default: ""
+    Description: '(Optional) Create an extra Keycloak user with this email address. Leave blank to skip; a default workshop user (ws-lab-7f3k) is always created.'
     AllowedPattern: '([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})?'
   KeyPairName:
     Type: String
     Default: ''
+    Description: '(Optional) EC2 key pair name for SSH access. Leave blank to skip; instance is always accessible via AWS Systems Manager Session Manager.'
   QuickSightRoleName:
     Type: String
     Default: ''
