@@ -1,0 +1,377 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Keycloak 26.1.4 + Quick Desktop (OIDC) + Quick Web (SAML) SSO, fronted by CloudFront
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.micro, t3.small, t3.medium, t3.large]
+  AdminPwd:
+    Type: String
+    Description: 'Admin password for Keycloak and test user. MUST be changed before deployment.'
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 32
+    AllowedPattern: '[a-zA-Z0-9_\-]+'
+  QuickUserEmail:
+    Type: String
+    Default: ""
+    AllowedPattern: '([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})?'
+  KeyPairName:
+    Type: String
+    Default: ''
+  QuickSightRoleName:
+    Type: String
+    Default: QuickSight-Keycloak-SSO-Role
+  SAMLProviderName:
+    Type: String
+    Default: Keycloak
+
+Mappings:
+  CloudFrontPrefixList:
+    us-east-1:
+      Id: pl-3b927c52
+    us-east-2:
+      Id: pl-b6a144df
+    us-west-1:
+      Id: pl-4ea04527
+    us-west-2:
+      Id: pl-82a045eb
+    ap-northeast-1:
+      Id: pl-58a04531
+    ap-northeast-2:
+      Id: pl-22a6434b
+    ap-northeast-3:
+      Id: pl-31a14458
+    ap-southeast-1:
+      Id: pl-31a34658
+    ap-southeast-2:
+      Id: pl-b8a742d1
+    ap-south-1:
+      Id: pl-9aa247f3
+    eu-west-1:
+      Id: pl-4fa04526
+    eu-west-2:
+      Id: pl-93a247fa
+    eu-west-3:
+      Id: pl-75b1541c
+    eu-central-1:
+      Id: pl-a3a144ca
+    eu-north-1:
+      Id: pl-fab65393
+    sa-east-1:
+      Id: pl-5da64334
+    ca-central-1:
+      Id: pl-38a64351
+
+Conditions:
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, '']]
+  # us-east-1 EC2 public DNS uses the legacy "compute-1.amazonaws.com" suffix (no region segment)
+  IsUsEast1: !Equals [!Ref 'AWS::Region', 'us-east-1']
+
+Resources:
+  # Only allow Keycloak HTTP (8080) from CloudFront edge IPs. No 0.0.0.0/0. Admin access via SSM.
+  KeycloakSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Keycloak origin - HTTP 8080 from CloudFront only
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourcePrefixListId: !FindInMap [CloudFrontPrefixList, !Ref 'AWS::Region', Id]
+          Description: CloudFront origin-facing
+      Tags:
+        - {Key: Name, Value: keycloak-quick-desktop-sg}
+
+  KeycloakInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: CfnAndSAML
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [cloudformation:SignalResource, cloudformation:DescribeStackResource]
+                Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*'
+              - Effect: Allow
+                Action: [iam:UpdateSAMLProvider, iam:GetSAMLProvider]
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:saml-provider/${SAMLProviderName}'
+
+  KeycloakInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref KeycloakInstanceRole]
+
+  KeycloakSAMLProvider:
+    Type: AWS::IAM::SAMLProvider
+    Properties:
+      Name: !Ref SAMLProviderName
+      SamlMetadataDocument: |
+        <?xml version="1.0" encoding="UTF-8"?>
+        <md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" entityID="https://placeholder.example.com/realms/placeholder">
+          <md:IDPSSODescriptor WantAuthnRequestsSigned="true" protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+            <md:KeyDescriptor use="signing">
+              <ds:KeyInfo>
+                <ds:X509Data>
+                  <ds:X509Certificate>MIIDDTCCAfWgAwIBAgIUPZOrdB0PsnZ+NQEPSK4yUudFyYUwDQYJKoZIhvcNAQELBQAwFjEUMBIGA1UEAwwLcGxhY2Vob2xkZXIwHhcNMjYwNTMwMTMwMTIxWhcNMzYwNTI3MTMwMTIxWjAWMRQwEgYDVQQDDAtwbGFjZWhvbGRlcjCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKeZf2ENM/U6VmW0RAdwRr6XVA4nuQw/3vk6JGQ78/ovNTEcMxHkqhacT9frKjS9r/9O2xU1cmQPNrO+mmz+dFl9Y77vrg4KtPggu8Pax1paw+IUV23bJv7WvP6vgLXiY7oDteOwZWxZVxNv+1siPyDSqst1LQsMfyLflj1U9destAN12TQcry3e4GLERoBeIe7J8hiZyWQqwy0i8ACOc5eV42HaVeBpFZLwLp8XkSLKRBHrxeBpfWf8OV+tba1/oh5T/3fpC1WzMsCiJfTDqBWIjk18E1R6/BmspVUCWZMkVLSL2M1aITE4IMs9rgb/qDQCJeuNmbpglPDqsh403PcCAwEAAaNTMFEwHQYDVR0OBBYEFPqeQQ6Z4IsPnVRzLWAvbOh108KeMB8GA1UdIwQYMBaAFPqeQQ6Z4IsPnVRzLWAvbOh108KeMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEBAIcUmSNu/JtsfvArohfvj2BuWVZZlsv8haeE5FQ4ghy/puElxvCX6CuEjLvKlqb6LJmV+SZp8QOV1PHrP1tvrVdPh6cuxm0v7Vj7rZfnBkc1YDKz2g3w2E/XbqQs6cIj5NjHcswED/32IMUxO5MBZVBNJne3PWPfEszBngPKYaQ1y4mCzdK23E5UPN1rIX0nObiSqaaurLwUS5O8uRWd0VLtzvGLrC7OEJu1G05EzoQg4/EMnhzBAfgOoVEBN3IexEDk7COxs42B91AFFLuHqEJT/iogKRGqUP3QStaVynOQmzwzK2Bj9czPU6DgmfUnBaPMFs6d1TDiYxQ24zvFqwk=</ds:X509Certificate>
+                </ds:X509Data>
+              </ds:KeyInfo>
+            </md:KeyDescriptor>
+            <md:NameIDFormat>urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress</md:NameIDFormat>
+            <md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="https://placeholder.example.com/realms/placeholder/protocol/saml"/>
+            <md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://placeholder.example.com/realms/placeholder/protocol/saml"/>
+          </md:IDPSSODescriptor>
+        </md:EntityDescriptor>
+      Tags:
+        - {Key: Purpose, Value: Keycloak-SAML-SSO}
+
+  QuickSightSAMLRole:
+    Type: AWS::IAM::Role
+    DependsOn: KeycloakSAMLProvider
+    Properties:
+      RoleName: !Ref QuickSightRoleName
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:aws:iam::${AWS::AccountId}:saml-provider/${SAMLProviderName}'
+            Action: ['sts:AssumeRoleWithSAML', 'sts:TagSession']
+            Condition:
+              StringEquals:
+                'SAML:aud': 'https://signin.aws.amazon.com/saml'
+      Policies:
+        - PolicyName: QuickSightAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'quicksight:*'
+                Resource: '*'
+
+  # Allocate EIP first so the CloudFront origin can be derived from it without
+  # creating a circular dependency with the instance.
+  KeycloakEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - {Key: Name, Value: keycloak-anycompany-idp}
+
+  # CloudFront fronts Keycloak: TLS at the edge (default *.cloudfront.net cert),
+  # HTTP to the origin restricted to the CloudFront prefix list. Origin domain is the
+  # EIP public DNS name (ec2-<ip-dashes>.<region>.compute.amazonaws.com) so this
+  # resource depends only on the EIP, not the instance.
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: Keycloak Quick Desktop SSO
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        Origins:
+          - Id: keycloak-origin
+            DomainName: !If
+              - IsUsEast1
+              - !Sub
+                - 'ec2-${Dashed}.compute-1.amazonaws.com'
+                - Dashed: !Join ['-', !Split ['.', !Ref KeycloakEIP]]
+              - !Sub
+                - 'ec2-${Dashed}.${AWS::Region}.compute.amazonaws.com'
+                - Dashed: !Join ['-', !Split ['.', !Ref KeycloakEIP]]
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+              HTTPPort: 8080
+              OriginReadTimeout: 60
+            OriginCustomHeaders:
+              - {HeaderName: X-Forwarded-Proto, HeaderValue: https}
+              - {HeaderName: X-Forwarded-Port, HeaderValue: '443'}
+        DefaultCacheBehavior:
+          TargetOriginId: keycloak-origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          # Managed-CachingDisabled / Managed-AllViewer (forward all headers, cookies, query strings)
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
+
+  KeycloakInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: [KeycloakSAMLProvider, CloudFrontDistribution]
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT20M
+        Count: 1
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      IamInstanceProfile: !Ref KeycloakInstanceProfile
+      KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref 'AWS::NoValue']
+      SecurityGroupIds: [!GetAtt KeycloakSecurityGroup.GroupId]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: {VolumeSize: 20, VolumeType: gp3}
+      Tags:
+        - {Key: Name, Value: keycloak-quick-desktop}
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          ADMIN_CRED="${AdminPwd}"
+          QUICK_USER_EMAIL="${QuickUserEmail}"
+          STACK_NAME="${AWS::StackName}"
+          REGION="${AWS::Region}"
+          ACCT="${AWS::AccountId}"
+          SAML_NAME="${SAMLProviderName}"
+          ROLE_NAME="${QuickSightRoleName}"
+          CF_DOMAIN="${CloudFrontDistribution.DomainName}"
+          exec > >(tee /var/log/keycloak-setup.log) 2>&1
+          echo "=== Setup Started $(date) ==="
+          signal_failure() { echo "FAIL: $1"; /opt/aws/bin/cfn-signal -e 1 --stack ${!STACK_NAME} --resource KeycloakInstance --region ${!REGION}; exit 1; }
+
+          # Step 1: Install
+          dnf update -y || signal_failure "dnf update"
+          dnf install -y docker jq || signal_failure "dnf install"
+          systemctl enable docker && systemctl start docker
+
+          # Step 2: Start Keycloak in HTTP/proxy mode (CloudFront terminates TLS)
+          PUBLIC="https://${!CF_DOMAIN}"
+          echo "Public URL: ${!PUBLIC}"
+          docker run -d --name keycloak --restart unless-stopped \
+            -p 8080:8080 -p 9000:9000 \
+            -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \
+            -e KC_BOOTSTRAP_ADMIN_PASSWORD="${!ADMIN_CRED}" \
+            -e KC_HOSTNAME="${!PUBLIC}" \
+            -e KC_HOSTNAME_STRICT=false \
+            -e KC_HTTP_ENABLED=true \
+            -e KC_PROXY_HEADERS=xforwarded \
+            -e KC_HEALTH_ENABLED=true \
+            -e KC_METRICS_ENABLED=true \
+            quay.io/keycloak/keycloak:26.1.4 start || signal_failure "docker run"
+
+          # Step 3: Wait ready (health on management port 9000, admin API on 8080)
+          for i in $(seq 1 90); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:9000/health/ready 2>/dev/null)" = "200" ] && break
+            sleep 2
+          done
+          curl -s http://localhost:9000/health/ready | grep -q UP || signal_failure "keycloak not ready"
+          KC="http://localhost:8080"
+
+          # Step 4: Admin token
+          ADMIN_TOKEN=$(curl -s -X POST "${!KC}/realms/master/protocol/openid-connect/token" \
+            -d "username=admin&password=${!ADMIN_CRED}&grant_type=password&client_id=admin-cli" | jq -r '.access_token')
+          [ -z "${!ADMIN_TOKEN}" ] || [ "${!ADMIN_TOKEN}" = "null" ] && signal_failure "admin token"
+          AUTH="Authorization: Bearer ${!ADMIN_TOKEN}"
+
+          # Step 5: Create realm
+          curl -s -X POST "${!KC}/admin/realms" -H "${!AUTH}" -H "Content-Type: application/json" \
+            -d '{"realm":"aws-realm","enabled":true,"displayName":"AWS Quick SSO","sslRequired":"external","loginWithEmailAllowed":true,"resetPasswordAllowed":true,"bruteForceProtected":true}'
+          echo "Realm created"
+
+          # Step 6: OIDC Client
+          curl -s -X POST "${!KC}/admin/realms/aws-realm/clients" -H "${!AUTH}" -H "Content-Type: application/json" \
+            -d '{"clientId":"amazon-quick-desktop","name":"Quick Desktop","enabled":true,"publicClient":true,"protocol":"openid-connect","standardFlowEnabled":true,"directAccessGrantsEnabled":true,"redirectUris":["http://localhost:*","http://127.0.0.1:*","https://localhost:*","quick://callback","http://localhost:9876/callback"],"webOrigins":["+"],"attributes":{"pkce.code.challenge.method":"S256","post.logout.redirect.uris":"http://localhost:*##http://127.0.0.1:*"}}'
+          echo "OIDC client created"
+
+          # Step 7: offline_access scope
+          CID=$(curl -s "${!KC}/admin/realms/aws-realm/clients?clientId=amazon-quick-desktop" -H "${!AUTH}" | jq -r '.[0].id')
+          OSID=$(curl -s "${!KC}/admin/realms/aws-realm/client-scopes" -H "${!AUTH}" | jq -r '.[] | select(.name=="offline_access") | .id')
+          [ -n "${!OSID}" ] && curl -s -X PUT "${!KC}/admin/realms/aws-realm/clients/${!CID}/default-client-scopes/${!OSID}" -H "${!AUTH}"
+
+          # Step 8: Create default workshop user
+          curl -s -X POST "${!KC}/admin/realms/aws-realm/users" -H "${!AUTH}" -H "Content-Type: application/json" \
+            -d "{\"username\":\"ws-lab-7f3k\",\"email\":\"ws-lab-7f3k@quick.aws\",\"emailVerified\":true,\"enabled\":true,\"firstName\":\"Workshop\",\"lastName\":\"Lab\",\"credentials\":[{\"type\":\"password\",\"value\":\"${!ADMIN_CRED}\",\"temporary\":false}]}"
+          echo "User ws-lab-7f3k created"
+
+          if [ -n "${!QUICK_USER_EMAIL}" ]; then
+            UN=$(echo "${!QUICK_USER_EMAIL}" | cut -d@ -f1)
+            curl -s -X POST "${!KC}/admin/realms/aws-realm/users" -H "${!AUTH}" -H "Content-Type: application/json" \
+              -d "{\"username\":\"${!UN}\",\"email\":\"${!QUICK_USER_EMAIL}\",\"emailVerified\":true,\"enabled\":true,\"firstName\":\"Quick\",\"lastName\":\"User\",\"credentials\":[{\"type\":\"password\",\"value\":\"${!ADMIN_CRED}\",\"temporary\":false}]}"
+            echo "User ${!UN} created"
+          fi
+
+          # Step 9: SAML Client
+          curl -s -X POST "${!KC}/admin/realms/aws-realm/clients" -H "${!AUTH}" -H "Content-Type: application/json" \
+            -d '{"clientId":"urn:amazon:webservices","name":"AWS SAML","protocol":"saml","enabled":true,"frontchannelLogout":true,"adminUrl":"https://signin.aws.amazon.com/saml","baseUrl":"/realms/aws-realm/protocol/saml/clients/amazon-aws","redirectUris":["https://signin.aws.amazon.com/saml*","*"],"attributes":{"saml.authnstatement":"true","saml.server.signature":"true","saml.assertion.signature":"true","saml.force.post.binding":"true","saml_name_id_format":"email","saml_force_name_id_format":"true","saml.client.signature":"false","saml_idp_initiated_sso_url_name":"amazon-aws","saml_idp_initiated_sso_relay_state":"https://quicksight.aws.amazon.com","saml_assertion_consumer_url_post":"https://signin.aws.amazon.com/saml","saml.assertion.lifespan":"300"},"fullScopeAllowed":true}'
+          echo "SAML client created"
+
+          # Step 10: Remove role_list scope
+          SCID=$(curl -s "${!KC}/admin/realms/aws-realm/clients?clientId=urn:amazon:webservices" -H "${!AUTH}" | jq -r '.[0].id')
+          RLID=$(curl -s "${!KC}/admin/realms/aws-realm/client-scopes" -H "${!AUTH}" | jq -r '.[] | select(.name=="role_list") | .id')
+          [ -n "${!RLID}" ] && curl -s -X DELETE "${!KC}/admin/realms/aws-realm/clients/${!SCID}/default-client-scopes/${!RLID}" -H "${!AUTH}" || true
+          echo "role_list removed"
+
+          # Step 11: SAML Mappers
+          MP="${!KC}/admin/realms/aws-realm/clients/${!SCID}/protocol-mappers/models"
+          curl -s -X POST "${!MP}" -H "${!AUTH}" -H "Content-Type: application/json" \
+            -d '{"name":"aws-role","protocol":"saml","protocolMapper":"saml-hardcode-attribute-mapper","config":{"attribute.value":"arn:aws:iam::'"${!ACCT}"':role/'"${!ROLE_NAME}"',arn:aws:iam::'"${!ACCT}"':saml-provider/'"${!SAML_NAME}"'","friendly.name":"Role","attribute.name":"https://aws.amazon.com/SAML/Attributes/Role","attribute.nameformat":"URI Reference"}}' || true
+          curl -s -X POST "${!MP}" -H "${!AUTH}" -H "Content-Type: application/json" \
+            -d '{"name":"aws-session-name","protocol":"saml","protocolMapper":"saml-user-property-mapper","config":{"user.attribute":"email","friendly.name":"Session Name","attribute.name":"https://aws.amazon.com/SAML/Attributes/RoleSessionName","attribute.nameformat":"URI Reference"}}' || true
+          curl -s -X POST "${!MP}" -H "${!AUTH}" -H "Content-Type: application/json" \
+            -d '{"name":"aws-session-duration","protocol":"saml","protocolMapper":"saml-hardcode-attribute-mapper","config":{"attribute.value":"3600","friendly.name":"Session Duration","attribute.name":"https://aws.amazon.com/SAML/Attributes/SessionDuration","attribute.nameformat":"Basic"}}' || true
+          curl -s -X POST "${!MP}" -H "${!AUTH}" -H "Content-Type: application/json" \
+            -d '{"name":"aws-principal-tag-email","protocol":"saml","protocolMapper":"saml-user-property-mapper","config":{"user.attribute":"email","friendly.name":"PrincipalTag Email","attribute.name":"https://aws.amazon.com/SAML/Attributes/PrincipalTag:Email","attribute.nameformat":"URI Reference"}}' || true
+          echo "SAML mappers created"
+
+          # Step 12: Update IAM SAML Provider with Keycloak metadata (frontend URLs = CloudFront)
+          curl -s -o /tmp/saml-meta.xml "${!KC}/realms/aws-realm/protocol/saml/descriptor"
+          [ -s /tmp/saml-meta.xml ] || signal_failure "download metadata"
+          aws iam update-saml-provider \
+            --saml-provider-arn "arn:aws:iam::${!ACCT}:saml-provider/${!SAML_NAME}" \
+            --saml-metadata-document file:///tmp/saml-meta.xml \
+            --region ${!REGION} || signal_failure "update saml provider"
+          echo "IAM SAML Provider updated"
+
+          # Step 13: Verify
+          curl -s "${!KC}/realms/aws-realm/.well-known/openid-configuration" | jq -e '.issuer' > /dev/null && echo "OIDC OK"
+          curl -s -o /dev/null -w "%{http_code}" "${!KC}/realms/aws-realm/protocol/saml/descriptor" | grep -q 200 && echo "SAML OK"
+
+          echo "=== Setup Complete $(date) ==="
+          /opt/aws/bin/cfn-signal -e 0 --stack ${!STACK_NAME} --resource KeycloakInstance --region ${!REGION}
+
+  KeycloakEIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref KeycloakInstance
+      AllocationId: !GetAtt KeycloakEIP.AllocationId
+
+Outputs:
+  KeycloakURL:
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}'
+  IssuerURL:
+    Description: OIDC Issuer URL (Quick Desktop)
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}/realms/aws-realm'
+  AuthEndpoint:
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}/realms/aws-realm/protocol/openid-connect/auth'
+  TokenEndpoint:
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}/realms/aws-realm/protocol/openid-connect/token'
+  JWKSURI:
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}/realms/aws-realm/protocol/openid-connect/certs'
+  ClientID:
+    Value: amazon-quick-desktop
+  AdminConsoleURL:
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}/admin/'
+  CloudFrontDomain:
+    Value: !GetAtt CloudFrontDistribution.DomainName
+  InstancePublicIP:
+    Value: !Ref KeycloakEIP
+  SAMLProviderArn:
+    Value: !Sub 'arn:aws:iam::${AWS::AccountId}:saml-provider/${SAMLProviderName}'
+  QuickSightRoleArn:
+    Value: !GetAtt QuickSightSAMLRole.Arn
+  IdPInitiatedSSOUrl:
+    Description: IdP-initiated SSO URL (Quick Web)
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}/realms/aws-realm/protocol/saml/clients/amazon-aws'
+  SAMLMetadataUrl:
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}/realms/aws-realm/protocol/saml/descriptor'
